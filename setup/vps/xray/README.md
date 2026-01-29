@@ -1,18 +1,41 @@
+```bash
 #!/bin/bash
 set -e
 
+# 检查是否为 Root 用户
+if [[ $EUID -ne 0 ]]; then
+   echo "Error: This script must be run as root." 
+   exit 1
+fi
+
 echo ">>> Installing dependencies..."
-apt update -y && apt install -y curl unzip jq
+apt update -y && apt install -y curl unzip jq openssl
 
 echo ">>> Installing Xray core..."
+# 使用官方脚本安装/更新
 bash <(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install
 
-echo ">>> Creating Xray config..."
+echo ">>> Generating REALITY keys and configuration..."
+# 1. 动态生成 UUID
+UUID=$(xray uuid)
+
+# 2. 动态生成 X25519 密钥对
+KEYS=$(xray x25519)
+PRIVATE_KEY=$(echo "$KEYS" | sed -n 's/.*PrivateKey: \([^ ]*\).*/\1/p')
+PUBLIC_KEY=$(echo "$KEYS" | sed -n 's/.*PublicKey: \([^ ]*\).*/\1/p')
+
+# 3. 动态生成 ShortID (8字节/16位十六进制)
+SHORT_ID=$(openssl rand -hex 8)
+
+# 4. 准备路径
 mkdir -p /usr/local/etc/xray
 
-cat >/usr/local/etc/xray/config.json <<'EOF'
+# 5. 写入配置 (使用变量替换)
+cat > /usr/local/etc/xray/config.json <<EOF
 {
-  "log": { "loglevel": "warning" },
+  "log": {
+    "loglevel": "warning"
+  },
   "inbounds": [
     {
       "port": 443,
@@ -20,15 +43,15 @@ cat >/usr/local/etc/xray/config.json <<'EOF'
       "settings": {
         "clients": [
           {
-            "id": "66b4c251-1aa0-4f20-9a3b-1f5c32a4c8a9",
+            "id": "$UUID",
             "flow": "xtls-rprx-vision"
           }
         ],
         "decryption": "none",
         "fallbacks": [
           {
-            "dest": "127.0.0.1:8080",
-            "xver": 1
+            "dest": 8080,
+            "xver": 0
           }
         ]
       },
@@ -37,28 +60,45 @@ cat >/usr/local/etc/xray/config.json <<'EOF'
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "www.lovelive-anime.jp:443",
+          "dest": "www.microsoft.com:443",
           "xver": 0,
-          "serverNames": [ "www.lovelive-anime.jp" ],
-          "privateKey": "2O7fw_JC8zFb3xi7mj86Zg1BgAA-FKun5syrl1C6q0w",
-          "publicKey": "3u-wBdCZz8lILwhGLj19bkr1uOporgXIz7PoQNqu4nY",
-          "maxTimeDiff": 70000,
-          "shortIds": [ "0123456789abcdef" ]
+          "serverNames": [
+            "www.microsoft.com"
+          ],
+          "privateKey": "$PRIVATE_KEY",
+          "shortIds": [
+            "$SHORT_ID"
+          ]
         }
       }
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" }
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
   ]
 }
 EOF
 
 echo ">>> Opening firewall..."
-ufw allow 443/tcp || true
-ufw allow 8080/tcp || true
+if command -v ufw >/dev/null 2>&1; then
+    ufw allow 443/tcp
+    ufw allow 8080/tcp
+fi
 
-echo ">>> Enabling and starting Xray..."
+echo ">>> Restarting Xray..."
 systemctl enable xray
 systemctl restart xray
-systemctl status xray --no-pager
+
+echo "--------------------------------------------------"
+echo "REALITY Setup Complete!"
+echo "Client Configuration Info:"
+echo "UUID:       $UUID"
+echo "Public Key: $PUBLIC_KEY"
+echo "Short ID:   $SHORT_ID"
+echo "Port:       443"
+echo "SNI:        www.microsoft.com"
+echo "--------------------------------------------------"
+```
