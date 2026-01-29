@@ -22,7 +22,7 @@ UUID=$(xray uuid)
 # 2. 动态生成 X25519 密钥对
 KEYS=$(xray x25519)
 PRIVATE_KEY=$(echo "$KEYS" | sed -n 's/.*PrivateKey: \([^ ]*\).*/\1/p')
-PUBLIC_KEY=$(echo "$KEYS" | sed -n 's/.*PublicKey: \([^ ]*\).*/\1/p')
+PUBLIC_KEY=$(echo "$KEYS" | sed -n 's/.*Hash32: \([^ ]*\).*/\1/p')
 
 # 3. 动态生成 ShortID (8字节/16位十六进制)
 SHORT_ID=$(openssl rand -hex 8)
