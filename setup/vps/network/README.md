@@ -107,11 +107,28 @@ echo "--------------------------------------------------"
 
 # Nginx
 ```bash
-# Install Nginx from official repository
+#!/bin/bash
+
+# 1. Update package index and install prerequisite packages
 apt update -y
 apt install -y curl gnupg2 ca-certificates lsb-release
-echo "deb http://nginx.org/packages/mainline/$(lsb_release -sc) nginx" | tee /etc/apt/sources.list.d/nginx.list
-curl -fsSL https://nginx.org/keys/nginx_signing.key | apt-key add -
+
+# 2. Set up the modern keyring directory
+mkdir -p /etc/apt/keyrings
+
+# 3. Download and dearmor the official Nginx signing key
+curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /etc/apt/keyrings/nginx-archive-keyring.gpg
+
+# 4. Determine OS name (e.g., ubuntu or debian) and codename, then add the repository
+OS_NAME=$(lsb_release -is | tr '[:upper:]' '[:lower:]')
+OS_CODENAME=$(lsb_release -sc)
+
+echo "deb [signed-by=/etc/apt/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${OS_NAME} ${OS_CODENAME} nginx" | tee /etc/apt/sources.list.d/nginx.list
+
+# 5. Set up APT pinning to prioritize Nginx official packages over system-provided versions
+echo -e "Package: *\nPin: origin nginx.org\nPin-Priority: 900\n" | tee /etc/apt/preferences.d/99nginx
+
+# 6. Update the package index with the new repository and install Nginx
 apt update -y
 apt install -y nginx
 ```
