@@ -443,8 +443,8 @@ fi
 install -m 0644 "$frp_stage_dir/filter.conf" "$frp_filter"
 install -m 0644 "$frp_stage_dir/jail.local" "$frp_jail_file"
 printf 'Wrote %s and %s\n' "$frp_filter" "$frp_jail_file"
-printf 'Proxy %s: TCP %s. Validate the journal match, then reload %s.\n' \
-  "$frp_proxy" "$frp_port" "$frp_jail"
+printf 'Proxy %s: TCP %s. Validate a recent log sample, then run fail2ban-client reload.\n' \
+  "$frp_proxy" "$frp_port"
 ```
 
 Generate the two example jails:
@@ -471,13 +471,14 @@ Test **the actual journal** before activation. This checks matching without
 issuing bans; it can scan the retained history for the selected service:
 
 ```bash
-fail2ban-regex systemd-journal \
-  /etc/fail2ban/filter.d/frp-um139.conf \
-  --journalmatch='_SYSTEMD_UNIT=frps.service'
+frp_sample=$(mktemp /tmp/frps-sample.XXXXXX.log)
+journalctl -u frps.service --since "10 minutes ago" -n 1000 \
+  --no-pager --all -o short-iso > "$frp_sample"
 
-fail2ban-regex systemd-journal \
-  /etc/fail2ban/filter.d/frp-pve.conf \
-  --journalmatch='_SYSTEMD_UNIT=frps.service'
+fail2ban-regex "$frp_sample" \
+  '/etc/fail2ban/filter.d/frp-um139.conf[logtype=file]'
+
+rm -f -- "$frp_sample"
 
 fail2ban-client -t
 ```
@@ -494,8 +495,7 @@ Once the checks pass, start Fail2ban and explicitly reload these jails:
 
 ```bash
 systemctl enable --now fail2ban
-fail2ban-client reload --restart frp-um139
-fail2ban-client reload --restart frp-pve
+fail2ban-client reload
 ```
 
 These commands reload the Fail2ban jails; they do not require restarting the
