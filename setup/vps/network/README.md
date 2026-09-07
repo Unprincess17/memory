@@ -326,3 +326,205 @@ echo "Port: $PORT"
 echo "Test command: curl -H \"X-API-KEY: $API_KEY\" http://localhost:$PORT/traffic"
 echo "=========================================="
 ```
+
+# fail2ban
+## fail2ban for frps
+```bash
+apt-get update
+apt-get install fail2ban nftables python3-systemd
+fail2ban-client --version
+```
+
+fail2ban setup script
+```bash
+#!/usr/bin/env bash
+# Generate a Fail2ban jail for one TCP SSH proxy served by host-based frps.
+# Usage: sudo bash setup-frp-jail.sh JAIL PROXY PUBLIC_PORT [FRPS_UNIT]
+set -euo pipefail
+
+if (( $# < 3 || $# > 4 )); then
+  echo "Usage: $0 JAIL PROXY PUBLIC_PORT [FRPS_UNIT]" >&2
+  exit 2
+fi
+
+frp_jail=$1
+frp_proxy=$2
+frp_port=$3
+frp_unit=${4:-frps.service}
+frp_config_dir=${FRP_F2B_CONFIG_DIR:-/etc/fail2ban}
+
+if [[ ! $frp_jail =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+  echo "Jail name must contain only letters, digits, underscores or hyphens." >&2
+  exit 2
+fi
+if [[ ! $frp_proxy =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+  echo "Proxy name must contain only letters, digits, dots, _ or -." >&2
+  exit 2
+fi
+if [[ ! $frp_port =~ ^[0-9]{1,5}$ ]]; then
+  echo "PUBLIC_PORT must be an integer between 1 and 65535." >&2
+  exit 2
+fi
+frp_port=$((10#$frp_port))
+if (( frp_port < 1 || frp_port > 65535 )); then
+  echo "PUBLIC_PORT must be between 1 and 65535." >&2
+  exit 2
+fi
+if [[ ! $frp_unit =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; then
+  echo "FRPS_UNIT must be a systemd service name, such as frps.service." >&2
+  exit 2
+fi
+
+for frp_required in filter.d/common.conf action.d/nftables.conf; do
+  if [[ ! -f "$frp_config_dir/$frp_required" ]]; then
+    echo "Missing $frp_config_dir/$frp_required; install Fail2ban first." >&2
+    exit 1
+  fi
+done
+
+frp_filter="$frp_config_dir/filter.d/$frp_jail.conf"
+frp_jail_file="$frp_config_dir/jail.d/$frp_jail.local"
+if [[ -e "$frp_config_dir/filter.d/$frp_jail.local" ]]; then
+  echo "A filter override already exists: filter.d/$frp_jail.local" >&2
+  echo "Review that override before using this generator for this jail." >&2
+  exit 1
+fi
+
+frp_stage_dir=$(mktemp -d "${TMPDIR:-/tmp}/frp-f2b.XXXXXX")
+trap 'rm -rf -- "$frp_stage_dir"' EXIT
+frp_proxy_regex=${frp_proxy//./\\.}
+
+cat > "$frp_stage_dir/filter.conf" <<EOF
+[INCLUDES]
+before = common.conf
+
+[DEFAULT]
+_daemon = frps
+_proxy = $frp_proxy_regex
+_esc = (?:\x1b\[[0-9;]*m)*
+_ts = (?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\s+)?
+_meta = \[I\]\s+\[proxy/proxy\.go:\d+\]\s+\[[0-9a-f]+\]\s+
+
+[Definition]
+prefregex = ^%(__prefix_line)s%(_esc)s%(_ts)s%(_meta)s<F-CONTENT>.+</F-CONTENT>$
+failregex = ^\[%(_proxy)s\]\s+get a user connection \[<ADDR>:\d+\]\s*%(_esc)s\s*$
+ignoreregex =
+journalmatch = _SYSTEMD_UNIT=$frp_unit
+EOF
+
+cat > "$frp_stage_dir/jail.local" <<EOF
+[$frp_jail]
+enabled = true
+backend = systemd
+filter = $frp_jail
+port = $frp_port
+protocol = tcp
+banaction = nftables[type=multiport]
+usedns = no
+findtime = 2m
+maxretry = 12
+bantime = 10m
+ignoreip = 127.0.0.1/8 ::1
+EOF
+
+mkdir -p "$frp_config_dir/filter.d" "$frp_config_dir/jail.d"
+if [[ -e "$frp_filter" || -e "$frp_jail_file" ]]; then
+  mkdir -p "$frp_config_dir/frp-backups"
+  frp_backup_dir=$(mktemp -d "$frp_config_dir/frp-backups/$frp_jail.XXXXXX")
+  if [[ -e "$frp_filter" ]]; then
+    cp -a -- "$frp_filter" "$frp_backup_dir/filter.conf"
+  fi
+  if [[ -e "$frp_jail_file" ]]; then
+    cp -a -- "$frp_jail_file" "$frp_backup_dir/jail.local"
+  fi
+  printf 'Previous files saved to %s\n' "$frp_backup_dir"
+fi
+
+install -m 0644 "$frp_stage_dir/filter.conf" "$frp_filter"
+install -m 0644 "$frp_stage_dir/jail.local" "$frp_jail_file"
+printf 'Wrote %s and %s\n' "$frp_filter" "$frp_jail_file"
+printf 'Proxy %s: TCP %s. Validate the journal match, then reload %s.\n' \
+  "$frp_proxy" "$frp_port" "$frp_jail"
+```
+
+Generate the two example jails:
+
+```bash
+bash setup-frp-jail.sh frp-um139 um139-ssh 9022
+bash setup-frp-jail.sh frp-pve pve-ssh 8822
+```
+
+The optional fourth argument is the systemd unit. For a different instance:
+
+```bash
+bash setup-frp-jail.sh frp-lab lab-ssh 9922 frps@public.service
+```
+
+The generated files for UM139 are:
+
+```text
+/etc/fail2ban/filter.d/frp-um139.conf
+/etc/fail2ban/jail.d/frp-um139.local
+```
+
+Test **the actual journal** before activation. This checks matching without
+issuing bans; it can scan the retained history for the selected service:
+
+```bash
+fail2ban-regex systemd-journal \
+  /etc/fail2ban/filter.d/frp-um139.conf \
+  --journalmatch='_SYSTEMD_UNIT=frps.service'
+
+fail2ban-regex systemd-journal \
+  /etc/fail2ban/filter.d/frp-pve.conf \
+  --journalmatch='_SYSTEMD_UNIT=frps.service'
+
+fail2ban-client -t
+```
+
+Expect each filter to match its own proxy's connection events. Other proxy
+entries appearing as missed is normal. If a new VPS has no connection events,
+make one normal SSH login through its public proxy port, then rerun the test.
+An SSH login can succeed and still count as one event for this rate rule.
+
+`fail2ban-client -t` alone does not establish that a filter matches real logs.
+Resolve compilation errors or unexpected zero matches before activation.
+
+Once the checks pass, start Fail2ban and explicitly reload these jails:
+
+```bash
+systemctl enable --now fail2ban
+fail2ban-client reload --restart frp-um139
+fail2ban-client reload --restart frp-pve
+```
+
+These commands reload the Fail2ban jails; they do not require restarting the
+FRP or SSH services. Check that the running jail loaded the replacement:
+
+```bash
+fail2ban-client get frp-um139 prefregex
+fail2ban-client get frp-um139 failregex
+fail2ban-client get frp-um139 ignoreip
+fail2ban-client status frp-um139
+fail2ban-client status frp-pve
+```
+
+For an accidental ban, replace `IP_ADDRESS` with the actual address:
+
+```bash
+fail2ban-client set frp-um139 unbanip IP_ADDRESS
+fail2ban-client set frp-pve unbanip IP_ADDRESS
+```
+
+Check the returned log target for filter exceptions or firewall errors. A
+common file target is `/var/log/fail2ban.log`:
+
+```bash
+tail -n 100 /var/log/fail2ban.log
+```
+
+If the configured target is the systemd journal, use:
+
+```bash
+journalctl -u fail2ban.service --since "10 minutes ago" --no-pager
+```
